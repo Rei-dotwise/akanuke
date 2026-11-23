@@ -36,13 +36,13 @@ RULES = [
     ("数の宣言", r"ポイントは[0-9一二三四五六七八九十]+つ|[0-9一二三四五六七八九十]+つのポイント|[0-9]+つのステップで", "数を先に宣言している", "警告", "each"),
     ("「いかがでしたか」型の締め", r"いかがでしたか|ぜひ試してみてください|参考になれば幸い", "定型の締め", "警告", "each"),
     ("投稿の型", r"保存推奨|知らない人多い|皆さんはどう", "SNSの定型", "警告", "each"),
-    ("投稿の型", r"^.{1,25}(?:話|件)。", "「〜な話。」型の書き出しではないか", "情報", "each"),
+    ("投稿の型", r"^.{1,25}(?:話|(?<![0-9一二三四五六七八九十百千])件)。", "「〜な話。」型の書き出しではないか", "情報", "each"),
     ("返信が「要約、評価、質問」になる", r"素晴らしい(?:視点|取り組み|考察)|参考になりました|どのように(?:され|して)いますか", "定型の評価や質問", "警告", "each"),
-    ("AIとのやり取りが残る", r"ご要望を踏まえ|以下のように(?:まとめ|整理)ました|以下にまとめます|承知しました|わかりやすく解説します|初心者にもわかりやすく|ご参考までに", "依頼への返事が本文に残っている", "警告", "each"),
+    ("AIとのやり取りが残る", r"ご要望を踏まえ|以下のように(?:まとめ|整理し)ました|以下にまとめます|承知しました|わかりやすく解説します|初心者にもわかりやすく|ご参考までに", "依頼への返事が本文に残っている", "警告", "each"),
     ("出典のない総意", r"多くの(?:人|方|企業|営業担当者|ビジネスパーソン|担当者)が|誰もが", "観察した範囲を書けるか", "情報", "each"),
     ("根拠のない評価", r"(?:難易度|期待効果|効果|重要度|優先度|インパクト)\s*:\s*(?:高|中|低|大|小|★)", "評価の根拠を書けるか", "警告", "each"),
     ("矢印でつなぐ因果", r"→[^→\n]+→", "確認した因果だけをつないでいるか", "情報", "each"),
-    ("教授調・説教調", r"ことが(?:重要|大切|大事)です|ましょう|すべきです|すべきだ", "上の位置から教えている", "警告", "repeat"),
+    ("教授調・説教調", r"ことが(?:重要|大切|大事)です|ましょう(?!か)|すべきです|すべきだ", "上の位置から教えている", "警告", "repeat"),
     ("予防線", r"と言えるでしょう|かもしれません|一概には言えません|状況によって異なり", "断定を避ける前置き", "情報", "each"),
     ("翻訳調", r"することができ|を行う|を行い|において|に対して", "直訳調の硬さ", "情報", "each"),
     ("ダッシュと括弧の多用", r"——|――|—", "ダッシュで文をつないでいる", "警告", "each"),
@@ -59,7 +59,8 @@ TAIGEN_TAIL = re.compile(r"[一-鿿ァ-ヶーA-Za-z0-9]$")
 BOLD = re.compile(r"\*\*[^*\n]+\*\*")
 BOLD_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\*\*")
 STRIP_MD = re.compile(r"`[^`]*`")
-FENCE = re.compile(r"^\s*(```|~~~)")
+NUMBER_REPORT = re.compile(r"(?:[0-9][0-9,.]*|[一二三四五六七八九十百千]+)[^\s0-9、。]{1,3}$")
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 
 def finding(kind, loc, text, why, level="警告"):
@@ -116,8 +117,10 @@ def check_lines(items):
             bold_run.append((loc, shown))
         else:
             flush_bold_run()
-        for m in SENT_END.finditer(re.sub(r"「[^」]*」|『[^』]*』", "「」", line)):
-            if m.group(0)[-1] == "。" and TAIGEN_TAIL.search(m.group(1)):
+        masked = re.sub(r"「[^」]*」|『[^』]*』", "「」", line)
+        for m in SENT_END.finditer(masked):
+            # 「12件。」「1200万円。」「三件。」のような数値の報告は体言止めに数えない
+            if m.group(0)[-1] == "。" and TAIGEN_TAIL.search(m.group(1)) and not NUMBER_REPORT.search(masked[: m.end() - 1]):
                 taigen.append((loc, shown))
     flush_bold_run()
 
@@ -142,14 +145,19 @@ def read_text(path):
     for i, line in enumerate(text.splitlines()):
         m = FENCE.match(line)
         if m:
+            fence = m.group(1)
             if in_code is None:
-                in_code = m.group(1)
-            elif m.group(1) == in_code:
+                in_code = fence
+            elif fence[0] == in_code[0] and len(fence) >= len(in_code) and not m.group(2).strip():
                 in_code = None
             items.append((f"L{i + 1}", ""))
             continue
         items.append((f"L{i + 1}", "" if in_code else line))
     return check_lines(items)
+
+
+class NotADeck(Exception):
+    pass
 
 
 def slide_order(z):
@@ -168,15 +176,39 @@ def slide_order(z):
     except (KeyError, ET.ParseError):
         pass
     names = [n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+    if not names and "ppt/presentation.xml" not in z.namelist():
+        raise NotADeck("pptx の構成ではありません")
     return sorted(names, key=lambda n: int(re.search(r"(\d+)\.xml$", n).group(1)))
 
 
+UNIT_EMU = {"in": 914400, "cm": 360000, "mm": 36000, "pt": 12700, "pc": 152400, "pi": 152400}
+
+
+def emu(value):
+    """座標を EMU に直す。「2in」のような単位付きの表記も読む。読めなければ None。"""
+    m = re.fullmatch(r"\s*(-?[0-9.]+)\s*([a-z]*)\s*", value or "0")
+    if not m or (m.group(2) and m.group(2) not in UNIT_EMU):
+        return None
+    try:
+        return int(float(m.group(1)) * UNIT_EMU.get(m.group(2), 1))
+    except ValueError:
+        return None
+
+
 def box(el):
+    """(x, y, 幅, 高さ) を返す。90度・270度回転している図形は幅と高さを入れ替える。"""
     xfrm = el.find(".//a:xfrm", NS)
     if xfrm is None or xfrm.find("a:off", NS) is None or xfrm.find("a:ext", NS) is None:
         return None
     off, ext = xfrm.find("a:off", NS), xfrm.find("a:ext", NS)
-    return int(off.get("x", 0)), int(off.get("y", 0)), int(ext.get("cx", 0)), int(ext.get("cy", 0))
+    vals = [emu(off.get("x")), emu(off.get("y")), emu(ext.get("cx")), emu(ext.get("cy"))]
+    if None in vals:
+        return None
+    x, y, cx, cy = vals
+    rot = (int(xfrm.get("rot", "0") or 0) // 60000) % 180 if (xfrm.get("rot") or "0").lstrip("-").isdigit() else 0
+    if 45 <= rot < 135:
+        x, y, cx, cy = x + (cx - cy) // 2, y + (cy - cx) // 2, cy, cx
+    return x, y, cx, cy
 
 
 def read_pptx(path):
@@ -215,7 +247,9 @@ def read_pptx(path):
                     for c in sppr.findall("a:solidFill/*", NS):
                         tag = c.tag.rsplit("}", 1)[1]
                         if tag in ("srgbClr", "schemeClr"):
-                            colors.add(f"{tag}:{c.get('val')}")
+                            # テーマ色の明度・彩度の調整（lumMod など）も別の指定として数える
+                            mods = ",".join(f"{m.tag.rsplit('}', 1)[1]}={m.get('val')}" for m in c)
+                            colors.add(f"{tag}:{c.get('val')}:{mods}")
 
             # 細い縦長図形のうち、右隣（0.3インチ以内）に縦方向で重なる文字がある本数を数える
             beside_text = 0
@@ -227,7 +261,7 @@ def read_pptx(path):
             if beside_text >= 2:
                 out.append(finding("左の縦線（アクセントバー）", loc, f"文字の左に細い縦長図形 {beside_text}個", "見出しや箱の左に縦線を付けていないか"))
             elif len(thin_bars) >= 2:
-                out.append(finding("左の縦線（アクセントバー）", loc, f"細い縦長図形 {len(thin_bars)}個", "位置と役割を画像で確認する", "情報"))
+                out.append(finding("図形の確認", loc, f"細い縦長図形 {len(thin_bars)}個（うち文字の左 {beside_text}個）", "位置と役割を画像で確認する", "情報"))
 
             h_lines = 0
             for el in list(root.iter(f"{{{NS['p']}}}cxnSp")) + list(root.iter(f"{{{NS['p']}}}sp")):
@@ -237,7 +271,7 @@ def read_pptx(path):
             if h_lines >= 2:
                 out.append(finding("仕切り線で区切って関係をぼかす", loc, f"水平の区切り線 {h_lines}本", "上下の要素の関係を線でごまかしていないか", "情報"))
             if len(colors) >= 4:
-                out.append(finding("意味のない色分け", loc, f"図形の塗り色（直接指定とテーマ色）{len(colors)}種類", "色ごとの意味を凡例で説明できるか", "情報"))
+                out.append(finding("意味のない色分け", loc, f"図形の塗りの指定 {len(colors)}種類（直接指定、テーマ色、明度違いを区別）", "色ごとの意味を凡例で説明できるか", "情報"))
             chars = sum(len(t) for t in paras)
             if chars >= 450 or len(paras) >= 25:
                 out.append(finding("1枚に全部盛る", loc, f"{len(paras)}段落・{chars}字", "主張を一文で言えるか"))
@@ -257,7 +291,9 @@ def main(argv):
             results[f] = read_pptx(path) if path.suffix.lower() == ".pptx" else read_text(path)
         except FileNotFoundError:
             errors[f] = "ファイルがありません"
-        except (UnicodeDecodeError, zipfile.BadZipFile, ET.ParseError, KeyError, OSError) as e:
+        except NotADeck as e:
+            errors[f] = f"読めませんでした（{e}）"
+        except (UnicodeDecodeError, zipfile.BadZipFile, ET.ParseError, KeyError, ValueError, OSError) as e:
             errors[f] = f"読めませんでした（{type(e).__name__}）"
     if as_json:
         print(json.dumps({"results": results, "errors": errors}, ensure_ascii=False, indent=2))
