@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """akanuke の機械検出。.md / .txt / .pptx を読み、AIっぽい型の候補を行番号やスライド番号付きで挙げる。
 
-標準ライブラリだけで動く。検出は候補の提示で、直すかどうかは文脈で判断する。
+標準ライブラリだけで動く。テキストは UTF-8（読めなければ CP932）で読む。
+検出は候補の提示で、直すかどうかは文脈で判断する。
 使い方: python3 check.py [--json] <file> [<file> ...]
+終了コード: 0 = 全ファイルを読めた / 1 = 引数なし / 2 = 読めないファイルがあった（読めた分の結果は出力する）
 """
 import json
 import re
 import sys
+import unicodedata
 import zipfile
+import posixpath
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
@@ -15,35 +19,47 @@ from pathlib import Path
 NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
 }
+EMU_PER_INCH = 914400
 
-# (パターン名, 正規表現, 説明)。パターン名は references の見出しと揃える。
-PHRASE_RULES = [
-    ("「〜のは、〜。」の溜め", re.compile(r"[^。\n「」]{1,20}のは、"), "主語を後ろへ回して溜めを作っている"),
-    ("「〜ではなく〜」", re.compile(r"ではなく|じゃなくて"), "誰も主張していない誤解を否定していないか"),
-    ("薬のような動詞", re.compile(r"効く|効いて|効か[なせ]|効きま|刺さる|刺さり|刺さっ|爆上が|劇的に|激変"), "何が起きるのかを書いていない"),
-    ("空疎な語", re.compile(r"シームレス|最適化|最大化|包括的|戦略的|ポテンシャル|可能性を引き出|新たな価値|革新的|次のレベル|本質的|鍵となる|カギとなる|不可欠|伴走者|変革"), "どの資料に貼っても通じる語"),
-    ("共感を煽る導入", re.compile(r"悩んでいませんか|という方も多いのでは|ありませんか？|実は、"), "誰にでも当てはまる問いかけ"),
-    ("「結論から言うと」", re.compile(r"結論から言うと|結論から言えば|結論から申し上げ"), "宣言自体が前置きになっている"),
-    ("数の宣言", re.compile(r"ポイントは[0-9０-９一二三四五六七八九十]+つ|[0-9０-９一二三四五六七八九十]+つのポイント|[0-9０-９]+つのステップで"), "数を先に宣言している"),
-    ("「いかがでしたか」型の締め", re.compile(r"いかがでしたか|ぜひ試してみてください|参考になれば幸い"), "定型の締め"),
-    ("投稿の型", re.compile(r"保存推奨|知らない人多い|な話。|という件。|皆さんはどう"), "SNSの定型"),
-    ("返信が「要約、評価、質問」になる", re.compile(r"素晴らしい(?:視点|取り組み|考察)|参考になりました|どのように(?:され|して)いますか"), "定型の評価や質問"),
-    ("教授調・説教調", re.compile(r"ことが(?:重要|大切|大事)です|しましょう|すべきです|すべきだ"), "上の位置から教えている"),
-    ("予防線", re.compile(r"と言えるでしょう|かもしれません|一概には言えません|状況によって異なり"), "断定を避ける前置き"),
-    ("翻訳調", re.compile(r"することができ|を行う|を行い|において|に対して"), "直訳調の硬さ"),
-    ("ダッシュと括弧の多用", re.compile(r"——|――|—"), "ダッシュで文をつないでいる"),
-    ("長い免責注釈", re.compile(r"保証するものではありません|正確性・完全性|将来の成果"), "誰も読まない免責文"),
-    ("01・02・03の番号と仕切り線", re.compile(r"(?:^|\s|[|｜])0[1-9](?=\s|$|[.．|｜:：])"), "十の位の0付き番号"),
+# 照合は NFKC で正規化した行に対して行う（全角数字・全角記号も同じ規則で拾うため）。
+# mode: each = 1件ずつ挙げる / repeat = 文書全体で3回以上のときだけ挙げる
+RULES = [
+    ("「〜のは、〜。」の溜め", r"[^。\n「」]{1,20}のは、", "主語を後ろへ回して溜めを作っていないか", "情報", "each"),
+    ("「〜ではなく〜」", r"ではなく|じゃなくて", "誰も主張していない誤解を否定していないか", "警告", "each"),
+    ("薬のような動詞", r"効く|効いて|効か[なせ]|効きま|刺さる|刺さり|刺さっ|爆上が|劇的に|激変", "何が起きるのかを書いていない", "警告", "each"),
+    ("空疎な語", r"シームレス|最適化|最大化|包括的|戦略的|ポテンシャル|可能性を引き出|新たな価値|革新的|次のレベル|本質的|鍵となる|カギとなる|不可欠|伴走者|変革", "どの資料に貼っても通じる語", "警告", "each"),
+    ("共感を煽る導入", r"悩んでいませんか|という方も多いのでは|ありませんか\?|実は、", "誰にでも当てはまる問いかけ", "警告", "each"),
+    ("「結論から言うと」", r"結論から言うと|結論から言えば|結論から申し上げ", "宣言自体が前置きになっている", "警告", "each"),
+    ("数の宣言", r"ポイントは[0-9一二三四五六七八九十]+つ|[0-9一二三四五六七八九十]+つのポイント|[0-9]+つのステップで", "数を先に宣言している", "警告", "each"),
+    ("「いかがでしたか」型の締め", r"いかがでしたか|ぜひ試してみてください|参考になれば幸い", "定型の締め", "警告", "each"),
+    ("投稿の型", r"保存推奨|知らない人多い|皆さんはどう", "SNSの定型", "警告", "each"),
+    ("投稿の型", r"^.{1,25}(?:話|件)。", "「〜な話。」型の書き出しではないか", "情報", "each"),
+    ("返信が「要約、評価、質問」になる", r"素晴らしい(?:視点|取り組み|考察)|参考になりました|どのように(?:され|して)いますか", "定型の評価や質問", "警告", "each"),
+    ("AIとのやり取りが残る", r"ご要望を踏まえ|以下のように(?:まとめ|整理)ました|以下にまとめます|承知しました|わかりやすく解説します|初心者にもわかりやすく|ご参考までに", "依頼への返事が本文に残っている", "警告", "each"),
+    ("出典のない総意", r"多くの(?:人|方|企業|営業担当者|ビジネスパーソン|担当者)が|誰もが", "観察した範囲を書けるか", "情報", "each"),
+    ("根拠のない評価", r"(?:難易度|期待効果|効果|重要度|優先度|インパクト)\s*:\s*(?:高|中|低|大|小|★)", "評価の根拠を書けるか", "警告", "each"),
+    ("矢印でつなぐ因果", r"→[^→\n]+→", "確認した因果だけをつないでいるか", "情報", "each"),
+    ("教授調・説教調", r"ことが(?:重要|大切|大事)です|ましょう|すべきです|すべきだ", "上の位置から教えている", "警告", "repeat"),
+    ("予防線", r"と言えるでしょう|かもしれません|一概には言えません|状況によって異なり", "断定を避ける前置き", "情報", "each"),
+    ("翻訳調", r"することができ|を行う|を行い|において|に対して", "直訳調の硬さ", "情報", "each"),
+    ("ダッシュと括弧の多用", r"——|――|—", "ダッシュで文をつないでいる", "警告", "each"),
+    ("長い免責注釈", r"保証するものではありません|正確性・完全性|将来の成果", "定型の免責文", "警告", "each"),
+    ("01・02・03の番号と仕切り線", r"(?:^|\s|\|)0[1-9](?=\s|$|[.|:])", "十の位の0付き番号", "警告", "each"),
 ]
+RULES = [(name, re.compile(rx), why, level, mode) for name, rx, why, level, mode in RULES]
+DISCLAIMER = next(rx for name, rx, *_ in RULES if name == "長い免責注釈")
 
-DISCLAIMER = next(rx for kind, rx, _ in PHRASE_RULES if kind == "長い免責注釈")
-COLON_LABEL = re.compile(r"^\s*(?:[-*#>]+\s*)?(?:(?:結論|ポイント|論点[0-9０-９]*|要点|まとめ|注意|基本方針)\s*[：:]|【[^】]{1,8}】)")
+COLON_LABEL = re.compile(r"^\s*(?:[-*#>]+\s*)?(?:(?:結論|ポイント|論点[0-9]*|要点|まとめ|注意|基本方針)\s*:|【[^】]{1,8}】)")
 KAGI_SHORT = re.compile(r"「([^」\n]{1,8})」(?!(?:と(?:言|い|呼|書|聞|思)|って|という|とは|の意味|を(?:検索|入力)))")
-SENT_END = re.compile(r"([^\s。！？!?]{1,2})[。！？!?]")
-TAIGEN_TAIL = re.compile(r"[一-鿿ァ-ヶーA-Za-z0-9０-９）)]$")
+SENT_END = re.compile(r"([^\s。!?]{1,2})[。!?]")
+TAIGEN_TAIL = re.compile(r"[一-鿿ァ-ヶーA-Za-z0-9]$")
 BOLD = re.compile(r"\*\*[^*\n]+\*\*")
+BOLD_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\*\*")
 STRIP_MD = re.compile(r"`[^`]*`")
+FENCE = re.compile(r"^\s*(```|~~~)")
 
 
 def finding(kind, loc, text, why, level="警告"):
@@ -53,7 +69,7 @@ def finding(kind, loc, text, why, level="警告"):
 def is_emphasis_kagi(line, m):
     """列挙の引用（「A」「B」）、記号入りの例、数字だけの引用は強調とみなさない。"""
     inner = m.group(1)
-    if re.search(r"[〜~：:？?！!。/／・…]", inner) or re.fullmatch(r"[0-9０-９A-Za-z]+", inner):
+    if re.search(r"[〜~:?!。/・….]", inner) or re.fullmatch(r"[0-9A-Za-z]+", inner):
         return False
     before = line[: m.start()].rstrip()
     after = line[m.end():]
@@ -62,129 +78,170 @@ def is_emphasis_kagi(line, m):
     return True
 
 
-def is_table_rule(line):
-    return bool(re.fullmatch(r"\s*\|?[\s:|-]+\|?\s*", line))
-
-
-def check_lines(lines, label_fn):
+def check_lines(items):
+    """items: [(場所, 行)] のリスト。反復の判定は items 全体（文書全体・デッキ全体）で行う。"""
     out = []
+    repeats = {}
     taigen = []
-    preachy = []
-    for i, raw in enumerate(lines):
-        if not raw.strip() or is_table_rule(raw):
+    bold_run = []
+
+    def flush_bold_run():
+        if len(bold_run) >= 3:
+            for loc, line in bold_run:
+                out.append(finding("太字の乱発", loc, line, f"箇条書き{len(bold_run)}項目の先頭がすべて太字"))
+        bold_run.clear()
+
+    for loc, raw in items:
+        if not raw.strip() or re.fullmatch(r"\s*\|?[\s:|-]+\|?\s*", raw):
+            flush_bold_run()
             continue
-        line = STRIP_MD.sub("", raw)
-        loc = label_fn(i)
-        for kind, rx, why in PHRASE_RULES:
-            m = rx.search(line)
-            if not m:
+        shown = STRIP_MD.sub("", raw)
+        line = unicodedata.normalize("NFKC", shown)
+        for name, rx, why, level, mode in RULES:
+            hits = rx.findall(line)
+            if not hits:
                 continue
-            if kind == "教授調・説教調":
-                preachy.append((loc, line))
-                continue
-            level = "情報" if kind in ("翻訳調", "予防線") else "警告"
-            out.append(finding(kind, loc, line, why, level))
+            if mode == "repeat":
+                repeats.setdefault(name, (why, level, []))[2].extend([(loc, shown)] * len(hits))
+            else:
+                out.append(finding(name, loc, shown, why, level))
         if COLON_LABEL.search(line):
-            out.append(finding("コロンや【】で区切る見出し", loc, line, "ラベルで見出しを作っている"))
+            out.append(finding("コロンや【】で区切る見出し", loc, shown, "ラベルで見出しを作っている"))
         for m in KAGI_SHORT.finditer(line):
-            if not is_emphasis_kagi(line, m):
-                continue
-            out.append(finding("強調のためのカギカッコ", loc, line, f"「{m.group(1)}」は引用か定義か", "情報"))
+            if is_emphasis_kagi(line, m):
+                out.append(finding("強調のためのカギカッコ", loc, shown, f"「{m.group(1)}」は引用か定義か", "情報"))
         if len(BOLD.findall(raw)) >= 3:
-            out.append(finding("太字の乱発", loc, line, "1行に太字が3か所以上"))
+            out.append(finding("太字の乱発", loc, shown, "1行に太字が3か所以上"))
+        if BOLD_LIST_ITEM.match(raw):
+            bold_run.append((loc, shown))
+        else:
+            flush_bold_run()
         for m in SENT_END.finditer(re.sub(r"「[^」]*」|『[^』]*』", "「」", line)):
             if m.group(0)[-1] == "。" and TAIGEN_TAIL.search(m.group(1)):
-                taigen.append((loc, line))
-    if len(preachy) >= 3:
-        for loc, line in preachy:
-            out.append(finding("教授調・説教調", loc, line, f"「〜しましょう」型が文書全体で{len(preachy)}回"))
+                taigen.append((loc, shown))
+    flush_bold_run()
+
+    for name, (why, level, hits) in repeats.items():
+        if len(hits) >= 3:
+            for loc, line in dict.fromkeys(hits):
+                out.append(finding(name, loc, line, f"{why}（文書全体で{len(hits)}回）", level))
     if len(taigen) >= 3:
-        for loc, line in taigen:
+        for loc, line in dict.fromkeys(taigen):
             out.append(finding("体言止めで決める", loc, line, f"名詞＋「。」の言い切りが文書全体で{len(taigen)}か所"))
     return out
 
 
 def read_text(path):
-    lines = path.read_text(encoding="utf-8").splitlines()
-    in_code = False
-    kept = []
-    for line in lines:
-        if line.strip().startswith("```"):
-            in_code = not in_code
-            kept.append("")
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("cp932")
+    items = []
+    in_code = None
+    for i, line in enumerate(text.splitlines()):
+        m = FENCE.match(line)
+        if m:
+            if in_code is None:
+                in_code = m.group(1)
+            elif m.group(1) == in_code:
+                in_code = None
+            items.append((f"L{i + 1}", ""))
             continue
-        kept.append("" if in_code else line)
-    return check_lines(kept, lambda i: f"L{i + 1}")
+        items.append((f"L{i + 1}", "" if in_code else line))
+    return check_lines(items)
 
 
-def emu_box(sp):
-    xfrm = sp.find(".//a:xfrm", NS)
-    if xfrm is None:
+def slide_order(z):
+    """表示順のスライドXMLパスを返す。presentation.xml が読めなければファイル名順にする。"""
+    try:
+        pres = ET.fromstring(z.read("ppt/presentation.xml"))
+        rels = ET.fromstring(z.read("ppt/_rels/presentation.xml.rels"))
+        target = {r.get("Id"): r.get("Target") for r in rels.findall("rel:Relationship", NS)}
+        order = []
+        for sid in pres.findall("p:sldIdLst/p:sldId", NS):
+            t = target.get(sid.get(f"{{{NS['r']}}}id"))
+            if t:
+                order.append(posixpath.normpath(posixpath.join("ppt", t.lstrip("/").removeprefix("ppt/"))))
+        if order:
+            return order
+    except (KeyError, ET.ParseError):
+        pass
+    names = [n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+    return sorted(names, key=lambda n: int(re.search(r"(\d+)\.xml$", n).group(1)))
+
+
+def box(el):
+    xfrm = el.find(".//a:xfrm", NS)
+    if xfrm is None or xfrm.find("a:off", NS) is None or xfrm.find("a:ext", NS) is None:
         return None
-    ext = xfrm.find("a:ext", NS)
-    if ext is None:
-        return None
-    return int(ext.get("cx", 0)), int(ext.get("cy", 0))
+    off, ext = xfrm.find("a:off", NS), xfrm.find("a:ext", NS)
+    return int(off.get("x", 0)), int(off.get("y", 0)), int(ext.get("cx", 0)), int(ext.get("cy", 0))
 
 
 def read_pptx(path):
     out = []
+    deck_items = []
     with zipfile.ZipFile(path) as z:
-        names = sorted(
-            (n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
-            key=lambda n: int(re.search(r"(\d+)", n.rsplit("/", 1)[1]).group(1)),
-        )
-        for name in names:
-            no = int(re.search(r"slide(\d+)\.xml", name).group(1))
+        for no, name in enumerate(slide_order(z), start=1):
             loc = f"スライド{no}"
             root = ET.fromstring(z.read(name))
             paras = []
-            small_long = []
             for p in root.iter(f"{{{NS['a']}}}p"):
                 text = "".join(t.text or "" for t in p.iter(f"{{{NS['a']}}}t")).strip()
                 if not text:
                     continue
                 paras.append(text)
+                deck_items.append((loc, text))
                 sizes = [int(r.get("sz")) for r in p.iter(f"{{{NS['a']}}}rPr") if r.get("sz")]
-                if sizes and max(sizes) <= 1100 and len(text) >= 80:
-                    small_long.append(text)
-            out += check_lines(paras, lambda i, loc=loc: loc)
+                if sizes and max(sizes) <= 1100 and len(text) >= 80 and not DISCLAIMER.search(text):
+                    out.append(finding("長い免責注釈", loc, text, "小さい文字の長文注釈"))
+            deck_items.append((loc, ""))
 
-            counts = Counter(t for t in paras if len(t) <= 15)
-            for text, n in counts.items():
+            for text, n in Counter(t for t in paras if len(t) <= 15).items():
                 if n >= 3:
                     out.append(finding("同じラベルを繰り返す", loc, text, f"同じラベルが{n}回"))
-            for text in small_long:
-                if DISCLAIMER.search(text):
-                    continue  # 文言ルールで既に挙げた注釈は二重に数えない
-                out.append(finding("長い免責注釈", loc, text, "小さい文字の長文注釈"))
 
-            bars = lines = 0
-            colors = set()
+            text_boxes, thin_bars, colors = [], [], set()
             for sp in root.iter(f"{{{NS['p']}}}sp"):
-                box = emu_box(sp)
+                b = box(sp)
                 has_text = any((t.text or "").strip() for t in sp.iter(f"{{{NS['a']}}}t"))
-                if box and not has_text:
-                    cx, cy = box
-                    if cy and cx and cx / cy <= 0.12 and cx <= 120000:
-                        bars += 1
-                    elif cx and cy / max(cx, 1) <= 0.05:
-                        lines += 1
+                if b and has_text:
+                    text_boxes.append(b)
+                elif b and b[2] and b[3] and b[2] / b[3] <= 0.12 and b[2] <= 120000:
+                    thin_bars.append(b)
                 sppr = sp.find("p:spPr", NS)
                 if sppr is not None:
-                    for c in sppr.findall("a:solidFill/a:srgbClr", NS):
-                        colors.add(c.get("val"))
-            lines += sum(1 for _ in root.iter(f"{{{NS['p']}}}cxnSp"))
-            if bars >= 2:
-                out.append(finding("左の縦線（アクセントバー）", loc, f"細い縦長の図形 {bars}個", "見出しや箱の左に縦線を付けていないか"))
-            if lines >= 2:
-                out.append(finding("仕切り線で区切って関係をぼかす", loc, f"区切り線 {lines}本", "上下の要素の関係を線でごまかしていないか", "情報"))
+                    for c in sppr.findall("a:solidFill/*", NS):
+                        tag = c.tag.rsplit("}", 1)[1]
+                        if tag in ("srgbClr", "schemeClr"):
+                            colors.add(f"{tag}:{c.get('val')}")
+
+            # 細い縦長図形のうち、右隣（0.3インチ以内）に縦方向で重なる文字がある本数を数える
+            beside_text = 0
+            for x, y, cx, cy in thin_bars:
+                for tx, ty, tcx, tcy in text_boxes:
+                    if 0 <= tx - (x + cx) <= 0.3 * EMU_PER_INCH and ty < y + cy and y < ty + tcy:
+                        beside_text += 1
+                        break
+            if beside_text >= 2:
+                out.append(finding("左の縦線（アクセントバー）", loc, f"文字の左に細い縦長図形 {beside_text}個", "見出しや箱の左に縦線を付けていないか"))
+            elif len(thin_bars) >= 2:
+                out.append(finding("左の縦線（アクセントバー）", loc, f"細い縦長図形 {len(thin_bars)}個", "位置と役割を画像で確認する", "情報"))
+
+            h_lines = 0
+            for el in list(root.iter(f"{{{NS['p']}}}cxnSp")) + list(root.iter(f"{{{NS['p']}}}sp")):
+                b = box(el)
+                if b and b[2] and b[3] <= b[2] * 0.05 and not any((t.text or "").strip() for t in el.iter(f"{{{NS['a']}}}t")):
+                    h_lines += 1
+            if h_lines >= 2:
+                out.append(finding("仕切り線で区切って関係をぼかす", loc, f"水平の区切り線 {h_lines}本", "上下の要素の関係を線でごまかしていないか", "情報"))
             if len(colors) >= 4:
-                out.append(finding("意味のない色分け", loc, f"塗り色 {len(colors)}種類", "色ごとの意味を凡例で説明できるか", "情報"))
+                out.append(finding("意味のない色分け", loc, f"図形の塗り色（直接指定とテーマ色）{len(colors)}種類", "色ごとの意味を凡例で説明できるか", "情報"))
             chars = sum(len(t) for t in paras)
             if chars >= 450 or len(paras) >= 25:
                 out.append(finding("1枚に全部盛る", loc, f"{len(paras)}段落・{chars}字", "主張を一文で言えるか"))
-    return out
+    return check_lines(deck_items) + out
 
 
 def main(argv):
@@ -193,20 +250,21 @@ def main(argv):
     if not files:
         print(__doc__.strip(), file=sys.stderr)
         return 1
-    results = {}
+    results, errors = {}, {}
     for f in files:
         path = Path(f)
-        if not path.exists():
-            print(f"ファイルがありません: {f}", file=sys.stderr)
-            return 1
-        results[f] = read_pptx(path) if path.suffix.lower() == ".pptx" else read_text(path)
+        try:
+            results[f] = read_pptx(path) if path.suffix.lower() == ".pptx" else read_text(path)
+        except FileNotFoundError:
+            errors[f] = "ファイルがありません"
+        except (UnicodeDecodeError, zipfile.BadZipFile, ET.ParseError, KeyError, OSError) as e:
+            errors[f] = f"読めませんでした（{type(e).__name__}）"
     if as_json:
-        print(json.dumps(results, ensure_ascii=False, indent=2))
-        return 0
+        print(json.dumps({"results": results, "errors": errors}, ensure_ascii=False, indent=2))
+        return 2 if errors else 0
     for f, items in results.items():
         print(f"=== {f}: {len(items)}件")
-        by_kind = Counter(x["pattern"] for x in items)
-        for kind, n in by_kind.most_common():
+        for kind, n in Counter(x["pattern"] for x in items).most_common():
             print(f"  {kind}: {n}")
         seen = set()
         for x in items:
@@ -215,8 +273,10 @@ def main(argv):
                 continue
             seen.add(key)
             print(f"[{x['level']}] {x['where']} {x['pattern']} … {x['why']}\n    {x['text']}")
+    for f, msg in errors.items():
+        print(f"=== {f}: {msg}", file=sys.stderr)
     print("\n検出は候補。意味があって置いた型は残してよい。見た目（色・縦線・改行位置）は画像で目視確認する。")
-    return 0
+    return 2 if errors else 0
 
 
 if __name__ == "__main__":
