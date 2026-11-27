@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "akanuke",
+  "description": "Claude Code marketplace for akanuke",
+  "owner": {
+    "name": "Dotwise"
+  },
+  "plugins": [
+    {
+      "name": "akanuke",
+      "description": "メール、資料、スライド、トークスクリプトから、AIが作ったと一目で分かる型を抜く日本語のスキル",
+      "version": "1.0.0",
+      "author": {
+        "name": "Dotwise"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/Rei-dotwise/akanuke",
+      "repository": "https://github.com/Rei-dotwise/akanuke",
+      "license": "MIT"
+    }
+  ]
+}
