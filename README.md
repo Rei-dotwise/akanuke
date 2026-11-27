@@ -114,7 +114,23 @@ Claude Code の中で次を実行します。
 /plugin install akanuke@akanuke
 ```
 
-### 2. フォルダを置く（Claude Code・Codex）
+### 2. npx skills か gh skill で入れる
+
+作業中のリポジトリの直下で実行すると、`.claude/skills/akanuke` に入ります。
+
+```sh
+# npx skills
+npx skills add Rei-dotwise/akanuke -a claude-code
+
+# GitHub CLI（2.95.0 で確認）。入れる先のフォルダを指定する
+gh skill install Rei-dotwise/akanuke akanuke --dir .claude/skills
+```
+
+全部のリポジトリで使うときは、npx skills では `-g`、GitHub CLI では `--scope user --agent claude-code` を付けます。この二つで入れた先は確かめていません。
+
+入れ方は一つだけにしてください。二つの入れ方で入れたときに、どちらが読み込まれるかは確かめていません。
+
+### 3. フォルダを置く（Claude Code・Codex）
 
 ```sh
 git clone https://github.com/Rei-dotwise/akanuke.git ~/akanuke
@@ -132,21 +148,27 @@ if [ -e "$d" ] || [ -L "$d" ]; then echo "既にあります: $d"; else ln -s ~/
 
 同じ名前のフォルダやリンクが既にあるときは、何も変えずに場所を表示します。中身を確かめてから置き換えてください。`skills/akanuke` フォルダを各ツールの skills フォルダへコピーしても動きます。
 
-### 3. Claude.ai に登録する
+### 4. Claude.ai に登録する
 
 [リリース](https://github.com/Rei-dotwise/akanuke/releases)の `akanuke.zip` をダウンロードし、Claude.ai の設定にあるスキルの画面から登録します。
 
-### 4. ChatGPT・Gemini・Copilot に貼る
+### 5. ChatGPT・Gemini・Copilot に貼る
 
 スキルを読み込めないAIには、[akanuke-pocket.md](pocket/akanuke-pocket.md) の約810字の指示文を、カスタム指示や Gem の指示欄に貼ります。型の一覧は要点だけで、スクリプトは使えません。
 
 ## 毎回使わせる
 
-スキルは、依頼の内容が説明文に合うと自動で読み込まれます。ただし、読み込むかどうかはAIが判断するので、毎回とは限りません。頼まなくても毎回読み込ませたいときは、次の1行を `~/.claude/CLAUDE.md`（Claude Code）や `~/.codex/AGENTS.md`（Codex）に足してください。これらのファイルは毎回読み込まれます。
+スキルは、依頼の内容が説明文に合うと自動で読み込まれます。ただし、読み込むかどうかはAIが判断するので、毎回とは限りません。頼まなくても毎回読み込ませたいときは、毎回読み込まれる指示の欄に、次の1行を足してください。
 
 ```
 日本語のメール、チャット、資料、スライド、トークスクリプトを書く・直すときは、頼まれなくても akanuke スキルの手順に従う。
 ```
+
+| 使うもの | 足す場所 |
+|---|---|
+| Claude Code | `~/.claude/CLAUDE.md`。1つのリポジトリだけなら、その中の `CLAUDE.md` |
+| Codex | `~/.codex/AGENTS.md`。1つのリポジトリだけなら、その中の `AGENTS.md` |
+| Claude.ai | 設定の、Claude への指示を書く欄。1つのプロジェクトだけなら、そのプロジェクトの指示（画面の名前は確かめていません） |
 
 ほかの日本語推敲スキルと一緒に使うと、指示が食い違うことがあります。出力が乱れるときは、対象の文書を分けるか、どちらかを止めてください。
 
@@ -168,7 +190,7 @@ $akanuke ChatGPTが書いたこのメール、AIっぽいところを指摘だ�
 
 ### check.py（型の候補を出す）
 
-.md / .txt / .pptx を読みます。メールでは、【】を重ねた件名、穴埋めの記号の残り、「させていただきます」の連続などを拾います。`--script` を付けると、台本として1文の長さと書き言葉も数えます。pptx では、文の型に加えて、同じラベルの繰り返し、0付き番号、文字の左にある細い縦長の図形、水平の区切り線、塗りの指定の数、小さい文字の長い注釈、1枚の文字量を数えます。スライド番号は表示順です。
+.md / .txt / .pptx を読みます。メールでは、【】を重ねた件名、穴埋めの記号の残り、「させていただきます」の連続などを拾います。`--script` を付けると、台本として1文の長さと書き言葉も数えます。`--fail-on-warn` を付けると、「警告」の候補があるときに終了コード1を返すので、CI や Git のフックで止められます。型の名前や作例を引く文書（この README など）では、引用した型にも警告が出て止まります。pptx では、文の型に加えて、同じラベルの繰り返し、0付き番号、文字の左にある細い縦長の図形、水平の区切り線、塗りの指定の数、小さい文字の長い注釈、1枚の文字量を数えます。スライド番号は表示順です。
 
 [examples.md](skills/akanuke/references/examples.md) の「直す前」のスライドを pptx で再現してかけた結果です。
 
@@ -192,6 +214,18 @@ $ python3 skills/akanuke/scripts/check.py deck.pptx
     【基本方針】AIは人の「代替」ではなく、社員の可能性を引き出す「伴走者」として位置づける
 （以下、候補ごとの行が続く）
 ```
+
+#### 会社ごとの語の一覧
+
+コマンドを実行するフォルダか、その上のフォルダに `.akanuke-words/` を置くと、check.py と diff.py が自動で読みます。対象のファイルがあるフォルダからは探しません。別の場所に置くときは `--words <フォルダ>` で指定します。
+
+```
+.akanuke-words/
+  allow.txt   指摘しない語。製品名や社内の用語など
+  flag.txt    必ず指摘する語。社内で使わないと決めた語など
+```
+
+どちらも1行に1語で、`#` で始まる行と空の行は読み飛ばします。flag.txt は、使わない語と代わりの語をタブで区切って書けます（`ソリューション<TAB>サービス`）。両方の一覧に書いた語は指摘します。check.py は flag.txt の語を「警告」として代わりの語と一緒に出します。diff.py が読むのは flag.txt だけで、直した後で flag.txt の語が増えたときに「恐れ」として出します。
 
 ### diff.py（直す前と後で意味が変わっていないかを比べる）
 
@@ -232,6 +266,7 @@ $ python3 skills/akanuke/scripts/diff.py --year 2026 before.txt after.txt
 - diff.py は文書全体で語を数えて比べ、文どうしの対応は取りません。何も出なくても意味が同じとは限りません。言い換えの多い直しでは、問題のない変化も「恐れ」として出ます。依頼の文が別の箇所にも残っていると、ある文が依頼から報告に変わっても拾えません。
 - 改行位置、色の意味、図と文の関係は、資料を画像で見ないと判断できません。
 - 確かめたのは macOS の Claude Code です。Codex、Claude.ai（スクリプトが動くかを含む）、Windows での動作と、貼り付け版を使ったときに指示どおりに直るかは、確かめていません。
+- npx skills は `npx skills add Rei-dotwise/akanuke -a claude-code -y` で、GitHub CLI は `gh skill install Rei-dotwise/akanuke akanuke --dir <フォルダ>` で、ファイルが入ることだけを確かめました。`-g` や `--scope user` で入れた先と、入れた後に読み込まれるかは確かめていません。
 
 ## リポジトリ構成
 
@@ -247,6 +282,10 @@ tests/                     テストと、テスト用のファイル
 ```
 
 テストは `cd tests && python3 -m unittest` で実行できます。作例の「直した後」で検出が0件であることと、この README に載せた出力が実際の出力と一致することも確かめています。変更の履歴は [CHANGELOG.md](CHANGELOG.md) にあります。
+
+## この README も check.py で点検した
+
+この README は check.py にかけ、出た候補を一つずつ見直しています。残した候補は、作例の引用、パターンの名前、出力の区分名（警告、恐れ、情報）、語の引用です。
 
 ## 作者
 

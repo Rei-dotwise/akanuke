@@ -5,8 +5,10 @@
 数値と単位、「約」などの幅、日付・曜日・時刻、否定、文の立場（依頼・提案・相談・決定・見込み・目標）、
 条件（以外・場合・のみ など）の語を、文書全体で数えて比べる。
 文の対応までは取らないので、出なかったから意味が同じ、とは言えない。最後は原文と並べて読む。
-使い方: python3 diff.py [--json] [--fail-on-risk] [--year 2026] <直す前> <直した後>
-終了コード: 0 = 比べられた / 1 = --fail-on-risk で恐れが見つかった / 2 = 読めないファイルがあった
+使い方: python3 diff.py [--json] [--fail-on-risk] [--year 2026] [--words <フォルダ>] <直す前> <直した後>
+  --words: 語の一覧のフォルダ（check.py と同じ）。flag.txt の語が直した後で増えたら恐れとして挙げる。
+    指定しなければ、作業フォルダから上へ .akanuke-words/ を探す
+終了コード: 0 = 比べられた / 1 = --fail-on-risk で恐れが見つかった / 2 = 引数の誤りか、読めないファイルがあった
 """
 import datetime
 import json
@@ -48,6 +50,22 @@ def read(path):
     except UnicodeDecodeError:
         text = data.decode("cp932")
     return unicodedata.normalize("NFKC", STRIP.sub("", text))
+
+
+def load_flag_words(folder=None):
+    """.akanuke-words/flag.txt の語を読む（check.py の load_words と同じ書式）。"""
+    if folder is None:
+        folder = next((d / ".akanuke-words" for d in [Path.cwd(), *Path.cwd().parents] if (d / ".akanuke-words").is_dir()), None)
+        if folder is None:
+            return []
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(str(folder))
+    f = folder / "flag.txt"
+    if not f.is_file():
+        return []
+    rows = [r.split("\t", 1)[0] for r in f.read_text(encoding="utf-8-sig").splitlines() if r.strip() and not r.lstrip().startswith("#")]
+    return [w for w in (unicodedata.normalize("NFKC", r).strip() for r in rows) if w]
 
 
 def features(text):
@@ -100,7 +118,7 @@ def fmt(d):
     return "、".join(f"{k}（{v}）" if v > 1 else k for k, v in d.items())
 
 
-def compare(src, dst, year=None):
+def compare(src, dst, year=None, flag_words=()):
     a, b = features(src), features(dst)
     risks = []
 
@@ -112,6 +130,8 @@ def compare(src, dst, year=None):
     add("数値の幅", *counter_diff(a["approx"], b["approx"]), "「約」「以上」「程度」などの幅が変わった")
     add("日付", *counter_diff(a["dates"], b["dates"]), "日付が消えたか、元にない日付が入った")
     add("時刻", *counter_diff(a["times"], b["times"]), "時刻が消えたか、元にない時刻が入った")
+    grown = {w: dst.count(w) - src.count(w) for w in flag_words if dst.count(w) > src.count(w)}
+    add("一覧で使わないと決めた語", {}, grown, "flag.txt の語が直した後で増えた")
     for name, unit, _ in GROUPS:
         ca, cb = a["groups"][name], b["groups"][name]
         gone, added = counter_diff(ca, cb)
@@ -159,6 +179,7 @@ def main(argv):
     as_json = "--json" in argv
     fail = "--fail-on-risk" in argv
     year = None
+    words_dir = None
     args = []
     it = iter(argv)
     for x in it:
@@ -168,17 +189,23 @@ def main(argv):
                 print(__doc__.strip(), file=sys.stderr)
                 return 2
             year = int(value)
+        elif x == "--words":
+            words_dir = next(it, "")
+            if not words_dir:
+                print(__doc__.strip(), file=sys.stderr)
+                return 2
         elif x not in ("--json", "--fail-on-risk"):
             args.append(x)
     if len(args) != 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     try:
+        flag_words = load_flag_words(words_dir)
         src, dst = read(args[0]), read(args[1])
     except (OSError, UnicodeDecodeError) as e:
-        print(f"読めませんでした（{type(e).__name__}）", file=sys.stderr)
+        print(f"読めませんでした（{type(e).__name__}: {e}）", file=sys.stderr)
         return 2
-    risks = compare(src, dst, year)
+    risks = compare(src, dst, year, flag_words)
     main_risks = [r for r in risks if not r.get("info")]
     if as_json:
         print(json.dumps({"risks": risks}, ensure_ascii=False, indent=2))

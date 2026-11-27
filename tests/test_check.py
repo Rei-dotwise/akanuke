@@ -138,5 +138,59 @@ class Docs(unittest.TestCase):
         self.assertEqual(sample, actual[: len(sample)])
 
 
+def cli(*args, cwd=None):
+    return subprocess.run([sys.executable, "-I", str(SCRIPTS / "check.py"), *map(str, args)], capture_output=True, text=True, cwd=cwd)
+
+
+class Words(unittest.TestCase):
+    TEXT = "「営業ノート」と最適化プランナーを使います。\n弊社のソリューションは導入がマストです。\n"
+
+    def run_with(self, words):
+        saved = dict(check.WORDS)
+        try:
+            check.WORDS.update(words)
+            return run_text(self.TEXT)
+        finally:
+            check.WORDS.update(saved)
+
+    def test_without_list(self):
+        kinds = Counter(x["pattern"] for x in self.run_with({"allow": [], "flag": []}))
+        self.assertIn("強調のためのカギカッコ", kinds)
+        self.assertIn("空疎な語", kinds)
+
+    def test_allow_and_flag(self):
+        found = self.run_with(check.load_words(FIXTURES / "words"))
+        kinds = Counter(x["pattern"] for x in found)
+        self.assertNotIn("強調のためのカギカッコ", kinds)
+        self.assertNotIn("空疎な語", kinds)
+        self.assertEqual(kinds["一覧で使わないと決めた語"], 2)
+        self.assertTrue(any("代わりに「サービス」" in x["why"] for x in found))
+
+    def test_found_from_working_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Path(d) / "a" / "b"
+            sub.mkdir(parents=True)
+            (Path(d) / ".akanuke-words").mkdir()
+            (Path(d) / ".akanuke-words" / "flag.txt").write_text("マスト\n", encoding="utf-8")
+            (sub / "x.txt").write_text(self.TEXT, encoding="utf-8")
+            out = cli("x.txt", cwd=sub)
+            self.assertEqual(out.returncode, 0)
+            self.assertIn("一覧で使わないと決めた語", out.stdout)
+            self.assertIn("語の一覧:", out.stdout)
+
+    def test_missing_folder(self):
+        self.assertEqual(cli("--words", FIXTURES / "nothing", FIXTURES / "natural.md").returncode, 2)
+
+
+class ExitCodes(unittest.TestCase):
+    def test_fail_on_warn(self):
+        self.assertEqual(cli("--fail-on-warn", FIXTURES / "smelly.md").returncode, 1)
+        self.assertEqual(cli("--fail-on-warn", FIXTURES / "natural.md").returncode, 0)
+        self.assertEqual(cli(FIXTURES / "smelly.md").returncode, 0)
+
+    def test_no_files(self):
+        self.assertEqual(cli().returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,15 @@ On older versions:
 /plugin install akanuke@akanuke
 ```
 
+With `npx skills` or the GitHub CLI (tested with `gh` 2.95.0). Run at the root of your repository to install into `.claude/skills/akanuke`:
+
+```sh
+npx skills add Rei-dotwise/akanuke -a claude-code
+gh skill install Rei-dotwise/akanuke akanuke --dir .claude/skills
+```
+
+For a user-wide install, add `-g` (npx skills) or `--scope user --agent claude-code` (gh); those locations have not been tested. Install it one way only; which copy is loaded when there are two has not been tested.
+
 Manual install (Claude Code or Codex). Existing folders or links are left untouched:
 
 ```sh
@@ -65,7 +74,7 @@ Claude.ai: upload `akanuke.zip` from the [releases](https://github.com/Rei-dotwi
 
 Other chat AIs: paste the text in [pocket/akanuke-pocket.md](pocket/akanuke-pocket.md) into the custom instructions.
 
-To use it on every request without naming it, add this line to `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`:
+To use it on every request without naming it, add this line to instructions that load every time: `~/.claude/CLAUDE.md` (Claude Code), `~/.codex/AGENTS.md` (Codex), or your personal or project instructions in Claude.ai:
 
 ```
 日本語のメール、チャット、資料、スライド、トークスクリプトを書く・直すときは、頼まれなくても akanuke スキルの手順に従う。
@@ -75,12 +84,13 @@ To use it on every request without naming it, add this line to `~/.claude/CLAUDE
 
 Both scripts use only the Python 3.9+ standard library.
 
-- `scripts/check.py` lists candidate patterns in .md, .txt, and .pptx files. For .pptx it also counts shapes: thin vertical bars beside text, horizontal dividers, the number of fill colors, and text volume per slide. `--script` adds sentence-length and written-style checks for talk scripts.
+- `scripts/check.py` lists candidate patterns in .md, .txt, and .pptx files. For .pptx it also counts shapes: thin vertical bars beside text, horizontal dividers, the number of fill colors, and text volume per slide. `--script` adds sentence-length and written-style checks for talk scripts. `--fail-on-warn` exits with 1 when any warning is found, for CI or git hooks.
 - `scripts/diff.py` compares the text before and after a rewrite and flags possible changes in meaning: numbers and their ranges, dates, weekdays, times, negation, stance words (request, proposal, decision, estimate, target), and condition words. It counts words across the whole document, so a clean result does not prove the meaning is unchanged.
+- Company word lists: put `.akanuke-words/allow.txt` (terms never flagged, such as product names) and `flag.txt` (terms always flagged, optionally `term<TAB>replacement`) in the folder where you run the command or any parent, or pass `--words <folder>`. check.py reads both; diff.py reads only `flag.txt` and flags terms that increased after the rewrite.
 
 ## Limitations
 
-The scripts only match fixed patterns. Line breaks, the meaning of colors, and the relationship between figures and text need a visual check. Testing so far covers Claude Code on macOS only.
+The scripts only match fixed patterns. Line breaks, the meaning of colors, and the relationship between figures and text need a visual check. Testing so far covers Claude Code on macOS only. For `npx skills` and `gh skill`, only that the files are installed into a repository folder has been checked.
 
 ## License
 

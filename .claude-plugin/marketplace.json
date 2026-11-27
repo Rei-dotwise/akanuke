@@ -9,7 +9,7 @@
     {
       "name": "akanuke",
       "description": "メール、資料、スライド、トークスクリプトから、AIが作ったと一目で分かる型を抜く日本語のスキル",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Dotwise"
       },

@@ -3,9 +3,14 @@
 
 標準ライブラリだけで動く。テキストは UTF-8（読めなければ CP932）で読む。
 検出は候補の提示で、直すかどうかは文脈で判断する。
-使い方: python3 check.py [--json] [--script] <file> [<file> ...]
+使い方: python3 check.py [--json] [--script] [--fail-on-warn] [--words <フォルダ>] <file> [<file> ...]
   --script: トークスクリプト・読み原稿として、1文の長さと書き言葉も数える（.md / .txt のみ）
-終了コード: 0 = 全ファイルを読めた / 1 = 引数なし / 2 = 読めないファイルがあった（読めた分の結果は出力する）
+  --fail-on-warn: 「警告」の候補が1件でもあれば終了コード1を返す（CI や Git のフック用）
+  --words: 語の一覧のフォルダ。指定しなければ、作業フォルダから上へ .akanuke-words/ を探す
+    allow.txt: 指摘しない語（製品名、社内の用語など）。1行に1語
+    flag.txt: 必ず指摘する語。「使わない語<TAB>代わりの語」とも書ける
+    どちらも # で始まる行と空の行は読み飛ばす
+終了コード: 0 = 全ファイルを読めた / 1 = --fail-on-warn で警告が見つかった / 2 = 引数の誤りか、読めないファイルがあった（読めた分の結果は出力する）
 """
 import json
 import re
@@ -74,6 +79,38 @@ NUMBER_REPORT = re.compile(r"(?:[0-9][0-9,.]*|[一二三四五六七八九十百
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 
+WORDS = {"allow": [], "flag": [], "path": None}
+ALLOW_MARK = "語"
+
+
+def load_words(folder=None):
+    """語の一覧を読む。folder がなければ作業フォルダから上へ .akanuke-words/ を探す。"""
+    if folder is None:
+        for d in [Path.cwd(), *Path.cwd().parents]:
+            if (d / ".akanuke-words").is_dir():
+                folder = d / ".akanuke-words"
+                break
+        else:
+            return {"allow": [], "flag": [], "path": None}
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(str(folder))
+
+    def lines(name):
+        f = folder / name
+        if not f.is_file():
+            return []
+        rows = []
+        for raw in f.read_text(encoding="utf-8-sig").splitlines():
+            if raw.strip() and not raw.lstrip().startswith("#"):
+                rows.append([unicodedata.normalize("NFKC", c).strip() for c in raw.split("\t", 1)])
+        return rows
+
+    allow = sorted({r[0] for r in lines("allow.txt") if r[0]}, key=len, reverse=True)
+    flag = [(r[0], r[1] if len(r) > 1 else "") for r in lines("flag.txt") if r[0]]
+    return {"allow": allow, "flag": flag, "path": str(folder)}
+
+
 def finding(kind, loc, text, why, level="警告"):
     return {"pattern": kind, "where": loc, "text": text.strip()[:80], "why": why, "level": level}
 
@@ -81,6 +118,8 @@ def finding(kind, loc, text, why, level="警告"):
 def is_emphasis_kagi(line, m):
     """列挙の引用（「A」「B」）、記号入りの例、数字だけの引用は強調とみなさない。"""
     inner = m.group(1)
+    if WORDS["allow"] and set(inner) == {ALLOW_MARK}:
+        return False
     if re.search(r"[〜~:?!。/・….]", inner) or re.fullmatch(r"[0-9A-Za-z]+", inner):
         return False
     before = line[: m.start()].rstrip()
@@ -110,6 +149,13 @@ def check_lines(items, script=False):
             continue
         shown = STRIP_MD.sub("", raw)
         line = unicodedata.normalize("NFKC", shown)
+        for word, alt in WORDS["flag"]:
+            if word in line:
+                why = f"「{word}」は一覧で使わないと決めた語" + (f"。代わりに「{alt}」" if alt else "")
+                out.append(finding("一覧で使わないと決めた語", loc, shown, why))
+        # 指摘しない語は、名詞のまま扱えるよう同じ長さの漢字で伏せてから照合する
+        for word in WORDS["allow"]:
+            line = line.replace(word, ALLOW_MARK * len(word))
         for name, rx, why, level, mode in RULES:
             hits = rx.findall(line)
             if not hits:
@@ -322,12 +368,26 @@ def read_pptx(path):
 
 
 def main(argv):
-    as_json = "--json" in argv
-    script = "--script" in argv
-    files = [a for a in argv if a not in ("--json", "--script")]
+    flags = ("--json", "--script", "--fail-on-warn")
+    as_json, script, fail = (x in argv for x in flags)
+    files, words_dir = [], None
+    it = iter(argv)
+    for a in it:
+        if a == "--words":
+            words_dir = next(it, None)
+            if not words_dir:
+                print(__doc__.strip(), file=sys.stderr)
+                return 2
+        elif a not in flags:
+            files.append(a)
     if not files:
         print(__doc__.strip(), file=sys.stderr)
-        return 1
+        return 2
+    try:
+        WORDS.update(load_words(words_dir))
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"語の一覧を読めませんでした（{type(e).__name__}: {e}）", file=sys.stderr)
+        return 2
     results, errors = {}, {}
     for f in files:
         path = Path(f)
@@ -339,9 +399,16 @@ def main(argv):
             errors[f] = f"読めませんでした（{e}）"
         except (UnicodeDecodeError, zipfile.BadZipFile, ET.ParseError, KeyError, ValueError, OSError) as e:
             errors[f] = f"読めませんでした（{type(e).__name__}）"
+    warned = fail and any(x["level"] == "警告" for items in results.values() for x in items)
+    code = 2 if errors else 1 if warned else 0
     if as_json:
-        print(json.dumps({"results": results, "errors": errors}, ensure_ascii=False, indent=2))
-        return 2 if errors else 0
+        out = {"results": results, "errors": errors}
+        if WORDS["path"]:
+            out["words"] = {"path": WORDS["path"], "allow": len(WORDS["allow"]), "flag": len(WORDS["flag"])}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return code
+    if WORDS["path"]:
+        print(f"語の一覧: {WORDS['path']}（指摘しない語 {len(WORDS['allow'])}、必ず指摘する語 {len(WORDS['flag'])}）")
     for f, items in results.items():
         print(f"=== {f}: {len(items)}件")
         for kind, n in Counter(x["pattern"] for x in items).most_common():
@@ -356,7 +423,7 @@ def main(argv):
     for f, msg in errors.items():
         print(f"=== {f}: {msg}", file=sys.stderr)
     print("\n検出は候補。意味があって置いた型は残してよい。見た目（色・縦線・改行位置）は画像で目視確認する。")
-    return 2 if errors else 0
+    return code
 
 
 if __name__ == "__main__":

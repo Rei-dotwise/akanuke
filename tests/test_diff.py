@@ -52,6 +52,13 @@ class Diff(unittest.TestCase):
             pairs += 1
         self.assertGreaterEqual(pairs, 3)
 
+
+    def test_flag_words(self):
+        risks = diff.compare("サービスを導入します。", "ソリューションを導入します。", flag_words=["ソリューション"])
+        self.assertIn("一覧で使わないと決めた語", {r["kind"] for r in risks})
+        risks = diff.compare("ソリューションを導入します。", "ソリューションを入れます。", flag_words=["ソリューション"])
+        self.assertNotIn("一覧で使わないと決めた語", {r["kind"] for r in risks})
+
     def test_cli_exit_code(self):
         import subprocess, sys
         from helpers import SCRIPTS
