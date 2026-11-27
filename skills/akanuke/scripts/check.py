@@ -3,7 +3,8 @@
 
 標準ライブラリだけで動く。テキストは UTF-8（読めなければ CP932）で読む。
 検出は候補の提示で、直すかどうかは文脈で判断する。
-使い方: python3 check.py [--json] <file> [<file> ...]
+使い方: python3 check.py [--json] [--script] <file> [<file> ...]
+  --script: トークスクリプト・読み原稿として、1文の長さと書き言葉も数える（.md / .txt のみ）
 終了コード: 0 = 全ファイルを読めた / 1 = 引数なし / 2 = 読めないファイルがあった（読めた分の結果は出力する）
 """
 import json
@@ -25,25 +26,28 @@ NS = {
 EMU_PER_INCH = 914400
 
 # 照合は NFKC で正規化した行に対して行う（全角数字・全角記号も同じ規則で拾うため）。
-# mode: each = 1件ずつ挙げる / repeat = 文書全体で3回以上のときだけ挙げる
+# mode: each = 1件ずつ挙げる / repeat = 文書全体で3回以上のときだけ挙げる / repeat2 = 2回以上のとき
 RULES = [
     ("「〜のは、〜。」の溜め", r"[^。\n「」]{1,20}のは、", "主語を後ろへ回して溜めを作っていないか", "情報", "each"),
     ("「〜ではなく〜」", r"ではなく|じゃなくて", "誰も主張していない誤解を否定していないか", "警告", "each"),
-    ("薬のような動詞", r"効く|効いて|効か[なせ]|効きま|刺さる|刺さり|刺さっ|爆上が|劇的に|激変", "何が起きるのかを書いていない", "警告", "each"),
+    ("薬のような動詞", r"効く|効いて|効か[なせ]|効きま|刺さる|刺さり|刺さっ|爆上が|劇的[にな]|激変", "何が起きるのかを書いていない", "警告", "each"),
     ("空疎な語", r"シームレス|最適化|最大化|包括的|戦略的|ポテンシャル|可能性を引き出|新たな価値|革新的|次のレベル|本質的|鍵となる|カギとなる|不可欠|伴走者|変革", "どの資料に貼っても通じる語", "警告", "each"),
-    ("共感を煽る導入", r"悩んでいませんか|という方も多いのでは|ありませんか\?|実は、", "誰にでも当てはまる問いかけ", "警告", "each"),
     ("「近年、〜が急速に」で始める", r"近年、.{0,30}急速に", "誰でも書ける背景説明から入っていないか", "警告", "each"),
     ("「〜につながります」の結び", r"につなが(?:り|る|っ)", "何がどう変わるのかを書いているか", "情報", "each"),
     ("「〜だけでなく〜も」の水増し", r"だけでなく", "本当に両方が主役か", "情報", "each"),
     ("機械的な「一方で」", r"一方で", "長所と短所を対で並べていないか", "情報", "repeat"),
     ("決め台詞で節を締める", r"(?:^[>\s]*|[。!?]\s*)(?:つまり|要するに)、", "直前の言い直しで締めていないか", "情報", "each"),
-    ("「結論から言うと」", r"結論から言うと|結論から言えば|結論から申し上げ", "宣言自体が前置きになっている", "警告", "each"),
+    ("「結論から言うと」", r"結論から言うと|結論から言えば", "宣言自体が前置きになっている", "警告", "each"),
     ("数の宣言", r"ポイントは[0-9一二三四五六七八九十]+つ|[0-9一二三四五六七八九十]+つのポイント|[0-9]+つのステップで", "数を先に宣言している", "警告", "each"),
-    ("「いかがでしたか」型の締め", r"いかがでしたか|ぜひ試してみてください|参考になれば幸い", "定型の締め", "警告", "each"),
-    ("投稿の型", r"保存推奨|知らない人多い|皆さんはどう", "SNSの定型", "警告", "each"),
-    ("投稿の型", r"^.{1,25}(?:話|(?<![0-9一二三四五六七八九十百千])件)。", "「〜な話。」型の書き出しではないか", "情報", "each"),
-    ("返信が「要約、評価、質問」になる", r"素晴らしい(?:視点|取り組み|考察)|参考になりました|どのように(?:され|して)いますか", "定型の評価や質問", "警告", "each"),
-    ("AIとのやり取りが残る", r"ご要望を踏まえ|以下のように(?:まとめ|整理し)ました|以下にまとめます|承知しました|わかりやすく解説します|初心者にもわかりやすく|ご参考までに", "依頼への返事が本文に残っている", "警告", "each"),
+    ("AIとのやり取りが残る", r"ご要望を踏まえ|以下のように(?:まとめ|整理し)ました|以下にまとめます|わかりやすく解説します|初心者にもわかりやすく|以下は.{0,20}(?:文案|案|例|ドラフト)です", "依頼への返事が本文に残っている", "警告", "each"),
+    ("書き手に向けた締めが残る", r"お手伝いできることがあれば|必要に応じて(?:調整|修正|変更)してください|参考になれば幸い|ご参考になれば", "AIが書き手に向けて書いた締め", "警告", "each"),
+    ("穴埋めの記号が残る", r"[〇○]{2}|XX(?:様|日|社)|[\[【][^\]】\n]{0,8}(?:名|日時|日付|会社|部署|担当|金額|URL)[\]】](?!\()", "埋めていない欄が残っていないか", "警告", "each"),
+    ("件名が長い、【】を重ねる", r"【[^】\n]*】\s*【", "【】を重ねていないか", "警告", "each"),
+    ("毎回の「お気軽に」", r"お気軽に", "定型として毎回付けていないか", "情報", "repeat2"),
+    ("「させていただきます」の連続", r"させていただ", "「します」で足りないか", "情報", "repeat"),
+    ("「〜となっております」の連続", r"となっております|となっています", "「です」で足りないか", "情報", "repeat"),
+    ("二重敬語と重ねすぎ", r"拝見させていただ|おっしゃられ|お伺いさせていただ|ご(?:確認|検討)していただ", "敬語を重ねていないか", "警告", "each"),
+    ("共感の定型を重ねる", r"(?:大変|とても)よく(?:分|わ)かります|お気持ち.{0,6}(?:分|わ)かります", "受けの定型を重ねていないか", "情報", "each"),
     ("出典のない総意", r"多くの(?:人|方|企業|営業担当者|ビジネスパーソン|担当者)が|誰もが", "観察した範囲を書けるか", "情報", "each"),
     ("根拠のない評価", r"(?:難易度|期待効果|効果|重要度|優先度|インパクト)\s*:\s*(?:高|中|低|大|小|★)", "評価の根拠を書けるか", "警告", "each"),
     ("矢印でつなぐ因果", r"→[^→\n]+→", "確認した因果だけをつないでいるか", "情報", "each"),
@@ -54,13 +58,15 @@ RULES = [
     ("長い免責注釈", r"保証するものではありません|正確性・完全性|将来の成果", "定型の免責文", "警告", "each"),
     ("01・02・03の番号と仕切り線", r"(?:^|\s|\|)0[1-9](?=\s|$|[.|:])", "十の位の0付き番号", "警告", "each"),
 ]
-RULES = [(name, re.compile(rx), why, level, mode) for name, rx, why, level, mode in RULES]
+REPEAT2 = {name for name, _, _, _, mode in RULES if mode == "repeat2"}
+RULES = [(name, re.compile(rx), why, level, "repeat" if mode == "repeat2" else mode) for name, rx, why, level, mode in RULES]
 DISCLAIMER = next(rx for name, rx, *_ in RULES if name == "長い免責注釈")
 
 COLON_LABEL = re.compile(r"^\s*(?:[-*#>]+\s*)?(?:(?:結論|ポイント|論点[0-9]*|要点|まとめ|注意|基本方針)\s*:|【[^】]{1,8}】)")
 KAGI_SHORT = re.compile(r"「([^」\n]{1,8})」(?!(?:と(?:言|い|呼|書|聞|思)|って|という|とは|の意味|を(?:検索|入力)))")
 SENT_END = re.compile(r"([^\s。!?]{1,2})[。!?]")
 TAIGEN_TAIL = re.compile(r"[一-鿿ァ-ヶーA-Za-z0-9]$")
+EMOJI_LEAD = re.compile(r"^\s*(?:[-*+#>]+\s*)?[\u2600-\u27bf\U0001F300-\U0001FAFF]")
 BOLD = re.compile(r"\*\*[^*\n]+\*\*")
 BOLD_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\*\*")
 STRIP_MD = re.compile(r"`[^`]*`")
@@ -84,12 +90,13 @@ def is_emphasis_kagi(line, m):
     return True
 
 
-def check_lines(items):
+def check_lines(items, script=False):
     """items: [(場所, 行)] のリスト。反復の判定は items 全体（文書全体・デッキ全体）で行う。"""
     out = []
     repeats = {}
     taigen = []
     bold_run = []
+    emoji_lines = []
 
     def flush_bold_run():
         if len(bold_run) >= 3:
@@ -116,6 +123,8 @@ def check_lines(items):
         for m in KAGI_SHORT.finditer(line):
             if is_emphasis_kagi(line, m):
                 out.append(finding("強調のためのカギカッコ", loc, shown, f"「{m.group(1)}」は引用か定義か", "情報"))
+        if EMOJI_LEAD.match(raw):
+            emoji_lines.append((loc, shown))
         if len(BOLD.findall(raw)) >= 3:
             out.append(finding("太字の乱発", loc, shown, "1行に太字が3か所以上"))
         if BOLD_LIST_ITEM.match(raw):
@@ -130,16 +139,45 @@ def check_lines(items):
     flush_bold_run()
 
     for name, (why, level, hits) in repeats.items():
-        if len(hits) >= 3:
+        if len(hits) >= (2 if name in REPEAT2 else 3):
             for loc, line in dict.fromkeys(hits):
                 out.append(finding(name, loc, line, f"{why}（文書全体で{len(hits)}回）", level))
+    if len(emoji_lines) >= 3:
+        for loc, line in emoji_lines:
+            out.append(finding("全項目にアイコンや絵文字を付ける", loc, line, f"行頭の絵文字が文書全体で{len(emoji_lines)}行"))
+    if script:
+        out.extend(check_script(items))
     if len(taigen) >= 3:
         for loc, line in dict.fromkeys(taigen):
             out.append(finding("体言止めで決める", loc, line, f"名詞＋「。」の言い切りが文書全体で{len(taigen)}か所"))
     return out
 
 
-def read_text(path):
+SPOKEN_STIFF = re.compile(r"であり、|および|ならびに|すなわち|(?<![上下平同高均対初中])等(?:の|を|が|で|、|。)|貴社")
+
+
+CUSTOMER_LINE = re.compile(r"^(?:[-*>]\s*)?(?:お客様|お客さま|顧客|先方|相手|担当者)\s*[:「]")
+
+
+def check_script(items):
+    """トークスクリプト用。声に出すと長い文と、話し言葉にしない書き言葉を挙げる。"""
+    out = []
+    for loc, raw in items:
+        line = unicodedata.normalize("NFKC", STRIP_MD.sub("", raw)).strip()
+        if not line:
+            continue
+        for sent in re.split(r"(?<=[。!?])", line):
+            body = re.sub(r"[（(][^）)]*[）)]", "", sent).strip()
+            if len(body) > 60:
+                out.append(finding("1文が長い", loc, sent, f"1文{len(body)}字。声に出して息が続くか", "情報"))
+        if CUSTOMER_LINE.match(line):
+            out.append(finding("相手が都合よく納得する", loc, raw, "相手がそう答えるとは限らない。問いと分岐にできるか", "情報"))
+        for m in SPOKEN_STIFF.finditer(line):
+            out.append(finding("書き言葉のまま", loc, raw, f"「{m.group(0).rstrip('、。のをがで')}」は話すときに言うか", "情報"))
+    return out
+
+
+def read_text(path, script=False):
     data = path.read_bytes()
     try:
         text = data.decode("utf-8-sig")
@@ -158,7 +196,7 @@ def read_text(path):
             items.append((f"L{i + 1}", ""))
             continue
         items.append((f"L{i + 1}", "" if in_code else line))
-    return check_lines(items)
+    return check_lines(items, script)
 
 
 class NotADeck(Exception):
@@ -285,7 +323,8 @@ def read_pptx(path):
 
 def main(argv):
     as_json = "--json" in argv
-    files = [a for a in argv if a != "--json"]
+    script = "--script" in argv
+    files = [a for a in argv if a not in ("--json", "--script")]
     if not files:
         print(__doc__.strip(), file=sys.stderr)
         return 1
@@ -293,7 +332,7 @@ def main(argv):
     for f in files:
         path = Path(f)
         try:
-            results[f] = read_pptx(path) if path.suffix.lower() == ".pptx" else read_text(path)
+            results[f] = read_pptx(path) if path.suffix.lower() == ".pptx" else read_text(path, script)
         except FileNotFoundError:
             errors[f] = "ファイルがありません"
         except NotADeck as e:
